@@ -61,8 +61,10 @@ function testBigDecimal(): void {
   // Test big int bit and
   assert((bigInt & BigInt.fromI32(42)) == BigInt.fromI32(40));
 
+  let r = bigInt << 6;
+
   // Test big int left shift
-  assert(bigInt << 6 == BigInt.fromString("568888888888888832"));
+  assert(bigInt << BigInt.fromI32(6) == BigInt.fromString("568888888888888832"));
 
   // Test big int right shift
   assert(bigInt >> 6 == BigInt.fromString("138888888888888"));
