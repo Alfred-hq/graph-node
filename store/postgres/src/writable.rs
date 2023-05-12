@@ -184,6 +184,17 @@ impl SyncStore {
         })
     }
 
+    async fn update_non_fatal_errors(
+        &self,
+        errors: Option<Vec<SubgraphError>>,
+    ) -> Result<(), StoreError> {
+        retry::forever(&self.logger, "update_non_fatal_errors", || {
+            let errors = errors.clone();
+            self.writable
+                .update_non_fatal_errors(self.site.clone(), errors)
+        })
+    }
+
     async fn fail_subgraph(&self, error: SubgraphError) -> Result<(), StoreError> {
         retry::forever_async(&self.logger, "fail_subgraph", || {
             let error = error.clone();
@@ -1466,6 +1477,13 @@ impl WritableStoreTrait for WritableStore {
         }
 
         Ok(outcome)
+    }
+
+    async fn update_non_fatal_errors(
+        &self,
+        errors: Option<Vec<SubgraphError>>,
+    ) -> Result<(), StoreError> {
+        self.store.update_non_fatal_errors(errors).await
     }
 
     fn unfail_non_deterministic_error(
