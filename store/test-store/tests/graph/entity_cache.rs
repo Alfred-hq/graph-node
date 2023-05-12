@@ -109,6 +109,13 @@ impl WritableStore for MockStore {
         unimplemented!()
     }
 
+    async fn update_non_fatal_errors(
+        &self,
+        _: Option<Vec<SubgraphError>>,
+    ) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+
     fn unfail_non_deterministic_error(&self, _: &BlockPtr) -> Result<UnfailOutcome, StoreError> {
         unimplemented!()
     }
