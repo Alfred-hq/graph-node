@@ -55,7 +55,6 @@ jobs:
         context: .
         file: ./docker/Dockerfile
         build-args:
-          - COMMIT_SHA=${{ github.sha }}
           - REPO_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)
           - BRANCH_NAME=${GITHUB_REF#refs/heads/}
           - TAG_NAME=${GITHUB_REF#refs/tags/}
@@ -70,7 +69,6 @@ jobs:
         context: .
         file: ./docker/Dockerfile
         build-args:
-          - COMMIT_SHA=${{ github.sha }}
           - REPO_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)
           - BRANCH_NAME=${GITHUB_REF#refs/heads/}
           - TAG_NAME=${GITHUB_REF#refs/tags/}
