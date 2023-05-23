@@ -272,13 +272,6 @@ pub trait WritableStore: ReadStore + DeploymentCursorTracker {
         parent_ptr: &BlockPtr,
     ) -> Result<UnfailOutcome, StoreError>;
 
-    /// If a deterministic error happened and the nonFatalErrors feature is enabled
-    /// this function updates the nonFatalErrors field in the deployment
-    async fn update_non_fatal_errors(
-        &self,
-        errors: Option<Vec<SubgraphError>>,
-    ) -> Result<(), StoreError>;
-
     /// If a non-deterministic error happened and the current deployment head is past the error
     /// block range, this function unfails the subgraph and deletes the error.
     fn unfail_non_deterministic_error(
@@ -304,6 +297,7 @@ pub trait WritableStore: ReadStore + DeploymentCursorTracker {
         data_sources: Vec<StoredDynamicDataSource>,
         deterministic_errors: Vec<SubgraphError>,
         offchain_to_remove: Vec<StoredDynamicDataSource>,
+        is_non_fatal_errors_active: bool,
     ) -> Result<(), StoreError>;
 
     /// The deployment `id` finished syncing, mark it as synced in the database

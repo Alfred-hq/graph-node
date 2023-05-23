@@ -479,6 +479,7 @@ where
                 persisted_data_sources,
                 deterministic_errors.clone().to_vec(),
                 processed_data_sources,
+                is_non_fatal_errors_active,
             )
             .await
             .context("Failed to transact block operations")?;
@@ -493,17 +494,6 @@ where
         if has_errors && !is_non_fatal_errors_active {
             // Only the first error is reported.
             return Err(BlockProcessingError::Deterministic(first_error.unwrap()));
-        }
-
-        // For subgraphs with nonFatalErrors feature enabled,
-        // We need to update the nonFatalErrors field in the subgraph_deployment table.
-        if has_errors && is_non_fatal_errors_active {
-            let errors = deterministic_errors.clone();
-            self.inputs
-                .store
-                .update_non_fatal_errors(Some(errors.to_vec()))
-                .await
-                .context("Failed to update nonFatalErrors")?;
         }
 
         let elapsed = start.elapsed().as_secs_f64();
@@ -523,6 +513,7 @@ where
             // just transacted so it will be already be set to unhealthy.
             return Err(BlockProcessingError::Canceled);
         }
+
         match needs_restart {
             true => Ok(Action::Restart),
             false => Ok(Action::Continue),

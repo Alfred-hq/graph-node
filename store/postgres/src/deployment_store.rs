@@ -1118,6 +1118,16 @@ impl DeploymentStore {
                     )?;
                 }
 
+                if !batch.deterministic_errors.is_empty() && batch.is_non_fatal_errors_active {
+                    let errors = batch.deterministic_errors.clone();
+                    deployment::update_non_fatal_errors(
+                        &conn,
+                        &site.deployment,
+                        deployment::SubgraphHealth::Unhealthy,
+                        Some(errors),
+                    )?;
+                }
+
                 let earliest_block = deployment::transact_block(
                     &conn,
                     &site,
@@ -1661,26 +1671,6 @@ impl DeploymentStore {
                     Ok(UnfailOutcome::Noop)
                 }
             }
-        })
-    }
-
-    // If a deterministic error happens and nonFatalErrors is set, we should
-    // update the nonFatalErrors field in the deployment table.
-    pub(crate) fn update_non_fatal_errors(
-        &self,
-        site: Arc<Site>,
-        errors: Option<Vec<SubgraphError>>,
-    ) -> Result<(), StoreError> {
-        let conn = &self.get_conn()?;
-        let deployment_id = &site.deployment;
-        conn.transaction(|| {
-            deployment::update_non_fatal_errors(
-                conn,
-                deployment_id,
-                deployment::SubgraphHealth::Unhealthy,
-                errors,
-            )?;
-            Ok(())
         })
     }
 
