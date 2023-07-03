@@ -14,7 +14,8 @@ use std::{convert::TryFrom, sync::Arc};
 use super::{
     block_stream::{self, BlockStream, FirehoseCursor},
     client::ChainClient,
-    BlockIngestor, EmptyNodeCapabilities, HostFn, IngestorError, TriggerWithHandler,
+    BlockIngestor, EmptyNodeCapabilities, HostFn, IngestorError, MappingTriggerTrait,
+    TriggerWithHandler,
 };
 
 use super::{
@@ -42,7 +43,11 @@ impl Block for MockBlock {
 }
 
 #[derive(Clone)]
-pub struct MockDataSource;
+pub struct MockDataSource {
+    pub api_version: semver::Version,
+    pub kind: String,
+    pub network: Option<String>,
+}
 
 impl<C: Blockchain> TryFrom<DataSourceTemplateInfo<C>> for MockDataSource {
     type Error = Error;
@@ -70,11 +75,11 @@ impl<C: Blockchain> DataSource<C> for MockDataSource {
     }
 
     fn kind(&self) -> &str {
-        todo!()
+        self.kind.as_str()
     }
 
     fn network(&self) -> Option<&str> {
-        todo!()
+        self.network.as_deref()
     }
 
     fn context(&self) -> std::sync::Arc<Option<crate::prelude::DataSourceContext>> {
@@ -86,7 +91,7 @@ impl<C: Blockchain> DataSource<C> for MockDataSource {
     }
 
     fn api_version(&self) -> semver::Version {
-        todo!()
+        self.api_version.clone()
     }
 
     fn runtime(&self) -> Option<Arc<Vec<u8>>> {
@@ -156,6 +161,10 @@ impl<C: Blockchain> DataSourceTemplate<C> for MockDataSourceTemplate {
     fn manifest_idx(&self) -> u32 {
         todo!()
     }
+
+    fn kind(&self) -> &str {
+        todo!()
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -219,11 +228,20 @@ impl TriggerData for MockTriggerData {
     fn error_context(&self) -> String {
         todo!()
     }
+
+    fn address_match(&self) -> Option<&[u8]> {
+        None
+    }
 }
 
 #[derive(Debug)]
 pub struct MockMappingTrigger {}
 
+impl MappingTriggerTrait for MockMappingTrigger {
+    fn error_context(&self) -> String {
+        todo!()
+    }
+}
 #[derive(Clone, Default)]
 pub struct MockTriggerFilter;
 

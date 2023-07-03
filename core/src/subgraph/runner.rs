@@ -271,9 +271,10 @@ where
             }
         };
 
-        // If new data sources have been created, and static filters are not in use, it is necessary
+        // If new onchain data sources have been created, and static filters are not in use, it is necessary
         // to restart the block stream with the new filters.
-        let needs_restart = block_state.has_created_data_sources() && !self.inputs.static_filters;
+        let needs_restart =
+            block_state.has_created_on_chain_data_sources() && !self.inputs.static_filters;
 
         {
             let _section = self
@@ -300,11 +301,23 @@ where
                 );
 
                 let block: Arc<C::Block> = if self.inputs.chain.is_refetch_block_required() {
+                    let cur = firehose_cursor.clone();
+                    let log = logger.cheap_clone();
+                    let chain = self.inputs.chain.cheap_clone();
                     Arc::new(
-                        self.inputs
-                            .chain
-                            .refetch_firehose_block(&logger, firehose_cursor.clone())
-                            .await?,
+                        retry(
+                            "refetch firehose block after dynamic datasource was added",
+                            &logger,
+                        )
+                        .limit(5)
+                        .no_timeout()
+                        .run(move || {
+                            let cur = cur.clone();
+                            let log = log.cheap_clone();
+                            let chain = chain.cheap_clone();
+                            async move { chain.refetch_firehose_block(&log, cur).await }
+                        })
+                        .await?,
                     )
                 } else {
                     block.cheap_clone()
@@ -343,7 +356,7 @@ where
                         .ctx
                         .process_trigger_in_hosts(
                             &logger,
-                            &runtime_hosts,
+                            Box::new(runtime_hosts.iter().map(|host| host.as_ref())),
                             &block,
                             &TriggerData::Onchain(trigger),
                             block_state,
@@ -403,7 +416,7 @@ where
             evict_stats,
         } = block_state
             .entity_cache
-            .as_modifications()
+            .as_modifications(block.number())
             .map_err(|e| BlockProcessingError::Unknown(e.into()))?;
         section.end();
 
@@ -452,7 +465,7 @@ where
         // If a deterministic error has happened, make the PoI to be the only entity that'll be stored.
         if has_errors && !is_non_fatal_errors_active {
             let is_poi_entity =
-                |entity_mod: &EntityModification| entity_mod.entity_ref().entity_type.is_poi();
+                |entity_mod: &EntityModification| entity_mod.key().entity_type.is_poi();
             mods.retain(is_poi_entity);
             // Confidence check
             assert!(
@@ -478,6 +491,7 @@ where
                 persisted_data_sources,
                 deterministic_errors,
                 processed_data_sources,
+                is_non_fatal_errors_active,
             )
             .await
             .context("Failed to transact block operations")?;
@@ -738,7 +752,12 @@ where
                 return Err(anyhow!("{}", err.to_string()));
             }
 
-            mods.extend(block_state.entity_cache.as_modifications()?.modifications);
+            mods.extend(
+                block_state
+                    .entity_cache
+                    .as_modifications(block.number())?
+                    .modifications,
+            );
             processed_data_sources.extend(block_state.processed_data_sources);
         }
 

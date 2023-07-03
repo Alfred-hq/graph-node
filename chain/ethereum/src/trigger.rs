@@ -1,3 +1,4 @@
+use graph::blockchain::MappingTriggerTrait;
 use graph::blockchain::TriggerData;
 use graph::data::subgraph::API_VERSION_0_0_2;
 use graph::data::subgraph::API_VERSION_0_0_6;
@@ -59,6 +60,21 @@ pub enum MappingTrigger {
     Block {
         block: Arc<LightEthereumBlock>,
     },
+}
+
+impl MappingTriggerTrait for MappingTrigger {
+    fn error_context(&self) -> std::string::String {
+        let transaction_id = match self {
+            MappingTrigger::Log { log, .. } => log.transaction_hash,
+            MappingTrigger::Call { call, .. } => call.transaction_hash,
+            MappingTrigger::Block { .. } => None,
+        };
+
+        match transaction_id {
+            Some(tx_hash) => format!("transaction {:x}", tx_hash),
+            None => String::new(),
+        }
+    }
 }
 
 // Logging the block is too verbose, so this strips the block from the trigger for Debug.
@@ -266,6 +282,20 @@ impl EthereumTrigger {
             EthereumTrigger::Log(log, _) => log.block_hash.unwrap(),
         }
     }
+
+    /// `None` means the trigger matches any address.
+    pub fn address(&self) -> Option<&Address> {
+        match self {
+            EthereumTrigger::Block(_, EthereumBlockTriggerType::WithCallTo(address)) => {
+                Some(address)
+            }
+            EthereumTrigger::Call(call) => Some(&call.to),
+            EthereumTrigger::Log(log, _) => Some(&log.address),
+
+            // Unfiltered block triggers match any data source address.
+            EthereumTrigger::Block(_, EthereumBlockTriggerType::Every) => None,
+        }
+    }
 }
 
 impl Ord for EthereumTrigger {
@@ -331,6 +361,10 @@ impl TriggerData for EthereumTrigger {
             ),
             None => String::new(),
         }
+    }
+
+    fn address_match(&self) -> Option<&[u8]> {
+        self.address().map(|address| address.as_bytes())
     }
 }
 

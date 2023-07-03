@@ -1,9 +1,12 @@
 use diesel::{self, PgConnection};
+use graph::blockchain::mock::MockDataSource;
 use graph::data::graphql::effort::LoadManager;
 use graph::data::query::QueryResults;
 use graph::data::query::QueryTarget;
 use graph::data::subgraph::schema::{DeploymentCreate, SubgraphError};
+use graph::data::subgraph::SubgraphFeature;
 use graph::data_source::CausalityRegion;
+use graph::data_source::DataSource;
 use graph::log;
 use graph::prelude::{QueryStoreManager as _, SubgraphStore as _, *};
 use graph::schema::InputSchema;
@@ -36,6 +39,7 @@ use tokio::runtime::{Builder, Runtime};
 use web3::types::H256;
 
 pub const NETWORK_NAME: &str = "fake_network";
+pub const DATA_SOURCE_KIND: &str = "mock/kind";
 pub const NETWORK_VERSION: &str = "graph test suite";
 
 pub use graph_store_postgres::Store;
@@ -167,6 +171,15 @@ pub async fn create_subgraph(
         chain: PhantomData,
     };
 
+    create_subgraph_with_manifest(subgraph_id, schema, manifest, base).await
+}
+
+pub async fn create_subgraph_with_manifest(
+    subgraph_id: &DeploymentHash,
+    schema: InputSchema,
+    manifest: SubgraphManifest<graph::blockchain::mock::MockBlockchain>,
+    base: Option<(DeploymentHash, BlockPtr)>,
+) -> Result<DeploymentLocator, StoreError> {
     let mut yaml = serde_yaml::Mapping::new();
     yaml.insert("dataSources".into(), Vec::<serde_yaml::Value>::new().into());
     let yaml = serde_yaml::to_string(&yaml).unwrap();
@@ -194,6 +207,50 @@ pub async fn create_test_subgraph(subgraph_id: &DeploymentHash, schema: &str) ->
     create_subgraph(subgraph_id, schema, None).await.unwrap()
 }
 
+pub async fn create_test_subgraph_with_features(
+    subgraph_id: &DeploymentHash,
+    schema: &str,
+) -> DeploymentLocator {
+    let schema = InputSchema::parse(schema, subgraph_id.clone()).unwrap();
+
+    let features = [
+        SubgraphFeature::FullTextSearch,
+        SubgraphFeature::NonFatalErrors,
+    ]
+    .iter()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+
+    let manifest = SubgraphManifest::<graph::blockchain::mock::MockBlockchain> {
+        id: subgraph_id.clone(),
+        spec_version: Version::new(1, 0, 0),
+        features: features,
+        description: Some(format!("manifest for {}", subgraph_id)),
+        repository: Some(format!("repo for {}", subgraph_id)),
+        schema: schema.clone(),
+        data_sources: vec![DataSource::Onchain(MockDataSource {
+            kind: DATA_SOURCE_KIND.into(),
+            api_version: Version::new(1, 0, 0),
+            network: Some(NETWORK_NAME.into()),
+        })],
+        graft: None,
+        templates: vec![],
+        chain: PhantomData,
+    };
+
+    let deployment_features = manifest.deployment_features();
+
+    let locator = create_subgraph_with_manifest(subgraph_id, schema, manifest, None)
+        .await
+        .unwrap();
+
+    SUBGRAPH_STORE
+        .create_subgraph_features(deployment_features)
+        .unwrap();
+
+    locator
+}
+
 pub fn remove_subgraph(id: &DeploymentHash) {
     let name = SubgraphName::new_unchecked(id.to_string());
     SUBGRAPH_STORE.remove_subgraph(name).unwrap();
@@ -207,11 +264,14 @@ pub fn remove_subgraph(id: &DeploymentHash) {
 }
 
 /// Transact errors for this block and wait until changes have been written
+/// Takes store, deployment, block ptr to, errors, and a bool indicating whether
+/// nonFatalErrors are active
 pub async fn transact_errors(
     store: &Arc<Store>,
     deployment: &DeploymentLocator,
     block_ptr_to: BlockPtr,
     errs: Vec<SubgraphError>,
+    is_non_fatal_errors_active: bool,
 ) -> Result<(), StoreError> {
     let metrics_registry = Arc::new(MetricsRegistry::mock());
     let stopwatch_metrics = StopwatchMetrics::new(
@@ -232,6 +292,7 @@ pub async fn transact_errors(
             Vec::new(),
             errs,
             Vec::new(),
+            is_non_fatal_errors_active,
         )
         .await?;
     flush(deployment).await
@@ -287,10 +348,11 @@ pub async fn transact_entities_and_dynamic_data_sources(
         deployment.id,
         Arc::new(manifest_idx_and_name),
     ))?;
+
     let mut entity_cache = EntityCache::new(Arc::new(store.clone()));
     entity_cache.append(ops);
     let mods = entity_cache
-        .as_modifications()
+        .as_modifications(block_ptr_to.number)
         .expect("failed to convert to modifications")
         .modifications;
     let metrics_registry = Arc::new(MetricsRegistry::mock());
@@ -309,6 +371,7 @@ pub async fn transact_entities_and_dynamic_data_sources(
             data_sources,
             Vec::new(),
             Vec::new(),
+            false,
         )
         .await
 }
@@ -556,10 +619,14 @@ fn build_store() -> (Arc<Store>, ConnectionPool, Config, Arc<SubscriptionManager
             };
 
             (
-                builder.network_store(vec![
-                    (NETWORK_NAME.to_string(), vec![ident.clone()]),
-                    (FAKE_NETWORK_SHARED.to_string(), vec![ident]),
-                ]),
+                builder.network_store(
+                    vec![
+                        (NETWORK_NAME.to_string(), ident.clone()),
+                        (FAKE_NETWORK_SHARED.to_string(), ident),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
                 primary_pool,
                 config,
                 subscription_manager,

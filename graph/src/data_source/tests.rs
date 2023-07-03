@@ -59,7 +59,11 @@ fn data_source_helpers() {
         .unwrap()
         .is_duplicate_of(&offchain));
 
-    let onchain = DataSource::<MockBlockchain>::Onchain(MockDataSource);
+    let onchain = DataSource::<MockBlockchain>::Onchain(MockDataSource {
+        api_version: Version::new(1, 0, 0),
+        kind: "mock/kind".into(),
+        network: Some("mock_network".into()),
+    });
     assert!(onchain.causality_region() == CausalityRegion::ONCHAIN);
     assert!(onchain.as_offchain().is_none());
 }

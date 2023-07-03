@@ -2,12 +2,17 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use anyhow::Error;
 use graph::{
-    blockchain::{self, block_stream::BlockWithTriggers, BlockPtr, EmptyNodeCapabilities},
+    blockchain::{
+        self, block_stream::BlockWithTriggers, BlockPtr, EmptyNodeCapabilities, MappingTriggerTrait,
+    },
     components::{
         store::{DeploymentLocator, EntityKey, EntityType, SubgraphFork},
         subgraph::{MappingError, ProofOfIndexingEvent, SharedProofOfIndexing},
     },
-    data::{store::scalar::Bytes, value::Word},
+    data::{
+        store::{scalar::Bytes, IdType},
+        value::Word,
+    },
     data_source::{self, CausalityRegion},
     prelude::{
         anyhow, async_trait, BigDecimal, BigInt, BlockHash, BlockNumber, BlockState,
@@ -25,10 +30,20 @@ use crate::{codec::entity_change::Operation, Block, Chain, NoopDataSourceTemplat
 #[derive(Eq, PartialEq, PartialOrd, Ord, Debug)]
 pub struct TriggerData {}
 
+impl MappingTriggerTrait for TriggerData {
+    fn error_context(&self) -> String {
+        "Failed to process substreams block".to_string()
+    }
+}
+
 impl blockchain::TriggerData for TriggerData {
     // TODO(filipe): Can this be improved with some data from the block?
     fn error_context(&self) -> String {
         "Failed to process substreams block".to_string()
+    }
+
+    fn address_match(&self) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -164,7 +179,7 @@ where
     async fn process_trigger(
         &self,
         logger: &Logger,
-        _hosts: &[Arc<T::Host>],
+        _: Box<dyn Iterator<Item = &T::Host> + Send + '_>,
         block: &Arc<Block>,
         _trigger: &data_source::TriggerData<Chain>,
         mut state: BlockState<Chain>,
@@ -182,15 +197,30 @@ where
                     return Err(MappingError::Unknown(anyhow!("Detected UNSET entity operation, either a server error or there's a new type of operation and we're running an outdated protobuf")));
                 }
                 Operation::Create | Operation::Update => {
-                    let entity_type: &str = &entity_change.entity;
-                    let entity_id: String = entity_change.id.clone();
-                    let key = EntityKey {
-                        entity_type: EntityType::new(entity_type.to_string()),
-                        entity_id: entity_id.clone().into(),
-                        causality_region: CausalityRegion::ONCHAIN, // Substreams don't currently support offchain data
+                    let schema = state.entity_cache.schema.as_ref();
+                    let entity_type = EntityType::new(entity_change.entity.to_string());
+                    // Make sure that the `entity_id` gets set to a value
+                    // that is safe for roundtrips through the database. In
+                    // particular, if the type of the id is `Bytes`, we have
+                    // to make sure that the `entity_id` starts with `0x` as
+                    // that will be what the key for such an entity have
+                    // when it is read from the database.
+                    //
+                    // Needless to say, this is a very ugly hack, and the
+                    // real fix is what's described in [this
+                    // issue](https://github.com/graphprotocol/graph-node/issues/4663)
+                    let entity_id: String = match schema.id_type(&entity_type)? {
+                        IdType::String => entity_change.id.clone(),
+                        IdType::Bytes => {
+                            if entity_change.id.starts_with("0x") {
+                                entity_change.id.clone()
+                            } else {
+                                format!("0x{}", entity_change.id)
+                            }
+                        }
                     };
-                    let mut data: HashMap<Word, Value> = HashMap::from_iter(vec![]);
 
+                    let mut data: HashMap<Word, Value> = HashMap::from_iter(vec![]);
                     for field in entity_change.fields.iter() {
                         let new_value: &codec::value::Typed = match &field.new_value {
                             Some(codec::Value {
@@ -201,14 +231,14 @@ where
 
                         let value: Value = decode_value(new_value)?;
                         *data
-                            .entry(Word::from(field.name.clone()))
+                            .entry(Word::from(field.name.as_str()))
                             .or_insert(Value::Null) = value;
                     }
 
                     write_poi_event(
                         proof_of_indexing,
                         &ProofOfIndexingEvent::SetEntity {
-                            entity_type,
+                            entity_type: entity_type.as_str(),
                             id: &entity_id,
                             // TODO: This should be an entity so we do not have to build the intermediate HashMap
                             data: &data,
@@ -216,6 +246,12 @@ where
                         causality_region,
                         logger,
                     );
+
+                    let key = EntityKey {
+                        entity_type: entity_type,
+                        entity_id: Word::from(entity_id),
+                        causality_region: CausalityRegion::ONCHAIN, // Substreams don't currently support offchain data
+                    };
 
                     let id = state.entity_cache.schema.id_value(&key)?;
                     data.insert(Word::from("id"), id);

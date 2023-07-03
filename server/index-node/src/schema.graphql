@@ -65,6 +65,7 @@ type SubgraphIndexingStatus {
   chains: [ChainIndexingStatus!]!
   entityCount: BigInt!
   node: String
+  historyBlocks: Int!
 }
 
 interface ChainIndexingStatus {
@@ -136,8 +137,10 @@ type CachedEthereumCall {
 }
 
 type SubgraphFeatures {
+  apiVersion: String
+  specVersion: String!
   features: [Feature!]!
-  errors: [String!]!
+  dataSources: [String!]!
   network: String
 }
 

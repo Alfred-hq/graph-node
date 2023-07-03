@@ -559,9 +559,15 @@ impl Layout {
                 entity_id: entity_data.id(),
                 causality_region: CausalityRegion::from_entity(&entity_data),
             };
-            let overwrite = entities.insert(key, entity_data).is_some();
-            if overwrite {
-                return Err(constraint_violation!("duplicate entity in result set"));
+            if entities.contains_key(&key) {
+                return Err(constraint_violation!(
+                    "duplicate entity {}[{}] in result set, block = {}",
+                    key.entity_type,
+                    key.entity_id,
+                    block
+                ));
+            } else {
+                entities.insert(key, entity_data);
             }
         }
         Ok(entities)
@@ -1024,6 +1030,7 @@ pub enum ColumnType {
     BigInt,
     Bytes,
     Int,
+    Int8,
     String,
     TSVector(FulltextConfig),
     Enum(EnumType),
@@ -1081,6 +1088,7 @@ impl ColumnType {
             ValueType::BigInt => Ok(ColumnType::BigInt),
             ValueType::Bytes => Ok(ColumnType::Bytes),
             ValueType::Int => Ok(ColumnType::Int),
+            ValueType::Int8 => Ok(ColumnType::Int8),
             ValueType::String => Ok(ColumnType::String),
         }
     }
@@ -1092,6 +1100,7 @@ impl ColumnType {
             ColumnType::BigInt => "numeric",
             ColumnType::Bytes => "bytea",
             ColumnType::Int => "integer",
+            ColumnType::Int8 => "int8",
             ColumnType::String => "text",
             ColumnType::TSVector(_) => "tsvector",
             ColumnType::Enum(enum_type) => enum_type.name.as_str(),

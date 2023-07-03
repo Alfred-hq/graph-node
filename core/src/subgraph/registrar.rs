@@ -6,6 +6,7 @@ use graph::blockchain::Blockchain;
 use graph::blockchain::BlockchainKind;
 use graph::blockchain::BlockchainMap;
 use graph::components::store::{DeploymentId, DeploymentLocator, SubscriptionManager};
+use graph::components::subgraph::Settings;
 use graph::data::subgraph::schema::DeploymentCreate;
 use graph::data::subgraph::Graft;
 use graph::prelude::{
@@ -24,6 +25,7 @@ pub struct SubgraphRegistrar<P, S, SM> {
     node_id: NodeId,
     version_switching_mode: SubgraphVersionSwitchingMode,
     assignment_event_stream_cancel_guard: CancelGuard, // cancels on drop
+    settings: Arc<Settings>,
 }
 
 impl<P, S, SM> SubgraphRegistrar<P, S, SM>
@@ -41,6 +43,7 @@ where
         chains: Arc<BlockchainMap>,
         node_id: NodeId,
         version_switching_mode: SubgraphVersionSwitchingMode,
+        settings: Arc<Settings>,
     ) -> Self {
         let logger = logger_factory.component_logger("SubgraphRegistrar", None);
         let logger_factory = logger_factory.with_parent(logger.clone());
@@ -58,6 +61,7 @@ where
             node_id,
             version_switching_mode,
             assignment_event_stream_cancel_guard: CancelGuard::new(),
+            settings,
         }
     }
 
@@ -167,13 +171,20 @@ where
                     match operation {
                         EntityChangeOperation::Set => {
                             store
-                                .assigned_node(&deployment)
+                                .assignment_status(&deployment)
                                 .map_err(|e| {
                                     anyhow!("Failed to get subgraph assignment entity: {}", e)
                                 })
                                 .map(|assigned| -> Box<dyn Stream<Item = _, Error = _> + Send> {
-                                    if let Some(assigned) = assigned {
+                                    if let Some((assigned,is_paused)) = assigned {
                                         if assigned == node_id {
+
+                                            if is_paused{
+                                                // Subgraph is paused, so we don't start it
+                                                debug!(logger, "Deployment assignee is this node, but it is paused, so we don't start it"; "assigned_to" => assigned, "node_id" => &node_id,"paused" => is_paused);
+                                                return Box::new(stream::empty());
+                                            }
+
                                             // Start subgraph on this node
                                             debug!(logger, "Deployment assignee is this node, broadcasting add event"; "assigned_to" => assigned, "node_id" => &node_id);
                                             Box::new(stream::once(Ok(AssignmentEvent::Add {
@@ -215,7 +226,7 @@ where
         let logger = self.logger.clone();
         let node_id = self.node_id.clone();
 
-        future::result(self.store.assignments(&self.node_id))
+        future::result(self.store.active_assignments(&self.node_id))
             .map_err(|e| anyhow!("Error querying subgraph assignments: {}", e))
             .and_then(move |deployments| {
                 // This operation should finish only after all subgraphs are
@@ -296,6 +307,10 @@ where
         let kind = BlockchainKind::from_manifest(&raw).map_err(|e| {
             SubgraphRegistrarError::ResolveError(SubgraphManifestResolveError::ResolveError(e))
         })?;
+
+        // Give priority to deployment specific history_blocks value.
+        let history_blocks =
+            history_blocks.or(self.settings.for_name(&name).map(|c| c.history_blocks));
 
         let deployment_locator = match kind {
             BlockchainKind::Arweave => {
@@ -551,7 +566,7 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
 ) -> Result<DeploymentLocator, SubgraphRegistrarError> {
     let raw_string = serde_yaml::to_string(&raw).unwrap();
     let unvalidated = UnvalidatedSubgraphManifest::<C>::resolve(
-        deployment,
+        deployment.clone(),
         raw,
         resolver,
         logger,
@@ -560,8 +575,17 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore>(
     .map_err(SubgraphRegistrarError::ResolveError)
     .await?;
 
+    // Determine if the graft_base should be validated.
+    // Validate the graft_base if there is a pending graft, ensuring its presence.
+    // If the subgraph is new (indicated by DeploymentNotFound), the graft_base should be validated.
+    // If the subgraph already exists and there is no pending graft, graft_base validation is not required.
+    let should_validate = match store.graft_pending(&deployment) {
+        Ok(graft_pending) => graft_pending,
+        Err(StoreError::DeploymentNotFound(_)) => true,
+        Err(e) => return Err(SubgraphRegistrarError::StoreError(e)),
+    };
     let manifest = unvalidated
-        .validate(store.cheap_clone(), true)
+        .validate(store.cheap_clone(), should_validate)
         .await
         .map_err(SubgraphRegistrarError::ManifestValidationError)?;
 

@@ -1,5 +1,5 @@
 //! Data structures and helpers for writing subgraph changes to the store
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     blockchain::{block_stream::FirehoseCursor, BlockPtr},
@@ -9,13 +9,11 @@ use crate::{
     data::{subgraph::schema::SubgraphError, value::Word},
     data_source::CausalityRegion,
     prelude::DeploymentHash,
+    schema::InputSchema,
     util::cache_weight::CacheWeight,
 };
 
-use super::{
-    BlockNumber, EntityKey, EntityModification, EntityType, StoreError, StoreEvent,
-    StoredDynamicDataSource,
-};
+use super::{BlockNumber, EntityKey, EntityType, StoreError, StoreEvent, StoredDynamicDataSource};
 
 /// A data structure similar to `EntityModification`, but tagged with a
 /// block. We might eventually replace `EntityModification` with this, but
@@ -39,8 +37,8 @@ use super::{
 /// `append_row`, eliminates an update in the database which would otherwise
 /// be needed to clamp the open block range of the entity to the block
 /// contained in `end`
-#[derive(Debug, PartialEq, Eq)]
-pub enum EntityMod {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntityModification {
     /// Insert the entity
     Insert {
         key: EntityKey,
@@ -71,18 +69,18 @@ pub struct EntityWrite<'a> {
     pub end: Option<BlockNumber>,
 }
 
-impl<'a> TryFrom<&'a EntityMod> for EntityWrite<'a> {
+impl<'a> TryFrom<&'a EntityModification> for EntityWrite<'a> {
     type Error = ();
 
-    fn try_from(emod: &'a EntityMod) -> Result<Self, Self::Error> {
+    fn try_from(emod: &'a EntityModification) -> Result<Self, Self::Error> {
         match emod {
-            EntityMod::Insert {
+            EntityModification::Insert {
                 key,
                 data,
                 block,
                 end,
             }
-            | EntityMod::Overwrite {
+            | EntityModification::Overwrite {
                 key,
                 data,
                 block,
@@ -95,48 +93,25 @@ impl<'a> TryFrom<&'a EntityMod> for EntityWrite<'a> {
                 end: *end,
             }),
 
-            EntityMod::Remove { .. } => Err(()),
+            EntityModification::Remove { .. } => Err(()),
         }
     }
 }
 
-impl EntityMod {
-    fn new(m: EntityModification, block: BlockNumber) -> Self {
-        match m {
-            EntityModification::Insert { key, data } => Self::Insert {
-                key,
-                data,
-                block,
-                end: None,
-            },
-            EntityModification::Overwrite { key, data } => Self::Overwrite {
-                key,
-                data,
-                block,
-                end: None,
-            },
-            EntityModification::Remove { key } => Self::Remove { key, block },
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn new_test(m: EntityModification, block: BlockNumber) -> Self {
-        Self::new(m, block)
-    }
-
+impl EntityModification {
     pub fn id(&self) -> &Word {
         match self {
-            EntityMod::Insert { key, .. }
-            | EntityMod::Overwrite { key, .. }
-            | EntityMod::Remove { key, .. } => &key.entity_id,
+            EntityModification::Insert { key, .. }
+            | EntityModification::Overwrite { key, .. }
+            | EntityModification::Remove { key, .. } => &key.entity_id,
         }
     }
 
     fn block(&self) -> BlockNumber {
         match self {
-            EntityMod::Insert { block, .. }
-            | EntityMod::Overwrite { block, .. }
-            | EntityMod::Remove { block, .. } => *block,
+            EntityModification::Insert { block, .. }
+            | EntityModification::Overwrite { block, .. }
+            | EntityModification::Remove { block, .. } => *block,
         }
     }
 
@@ -144,8 +119,8 @@ impl EntityMod {
     /// new row, for either a new or an existing entity
     fn is_write(&self) -> bool {
         match self {
-            EntityMod::Insert { .. } | EntityMod::Overwrite { .. } => true,
-            EntityMod::Remove { .. } => false,
+            EntityModification::Insert { .. } | EntityModification::Overwrite { .. } => true,
+            EntityModification::Remove { .. } => false,
         }
     }
 
@@ -158,44 +133,36 @@ impl EntityMod {
     /// Return `true` if `self` requires clamping of an existing version
     fn is_clamp(&self) -> bool {
         match self {
-            EntityMod::Insert { .. } => false,
-            EntityMod::Overwrite { .. } | EntityMod::Remove { .. } => true,
+            EntityModification::Insert { .. } => false,
+            EntityModification::Overwrite { .. } | EntityModification::Remove { .. } => true,
         }
     }
 
     pub fn creates_entity(&self) -> bool {
         match self {
-            EntityMod::Insert { .. } => true,
-            EntityMod::Overwrite { .. } | EntityMod::Remove { .. } => false,
-        }
-    }
-
-    fn key(&self) -> &EntityKey {
-        match self {
-            EntityMod::Insert { key, .. }
-            | EntityMod::Overwrite { key, .. }
-            | EntityMod::Remove { key, .. } => key,
+            EntityModification::Insert { .. } => true,
+            EntityModification::Overwrite { .. } | EntityModification::Remove { .. } => false,
         }
     }
 
     fn entity_count_change(&self) -> i32 {
         match self {
-            EntityMod::Insert { end: None, .. } => 1,
-            EntityMod::Insert { end: Some(_), .. } => {
+            EntityModification::Insert { end: None, .. } => 1,
+            EntityModification::Insert { end: Some(_), .. } => {
                 // Insert followed by a remove
                 0
             }
-            EntityMod::Overwrite { end: None, .. } => 0,
-            EntityMod::Overwrite { end: Some(_), .. } => {
+            EntityModification::Overwrite { end: None, .. } => 0,
+            EntityModification::Overwrite { end: Some(_), .. } => {
                 // Overwrite followed by a remove
                 -1
             }
-            EntityMod::Remove { .. } => -1,
+            EntityModification::Remove { .. } => -1,
         }
     }
 
     fn clamp(&mut self, block: BlockNumber) -> Result<(), StoreError> {
-        use EntityMod::*;
+        use EntityModification::*;
 
         match self {
             Insert { end, .. } | Overwrite { end, .. } => {
@@ -221,7 +188,7 @@ impl EntityMod {
 
     /// Turn an `Overwrite` into an `Insert`, return an error if this is a `Remove`
     fn as_insert(self, entity_type: &EntityType) -> Result<Self, StoreError> {
-        use EntityMod::*;
+        use EntityModification::*;
 
         match self {
             Insert { .. } => Ok(self),
@@ -249,7 +216,7 @@ impl EntityMod {
     fn as_entity_op(&self, at: BlockNumber) -> EntityOp<'_> {
         debug_assert!(self.block() <= at);
 
-        use EntityMod::*;
+        use EntityModification::*;
 
         match self {
             Insert {
@@ -287,6 +254,37 @@ impl EntityMod {
     }
 }
 
+impl EntityModification {
+    pub fn insert(key: EntityKey, data: Entity, block: BlockNumber) -> Self {
+        EntityModification::Insert {
+            key,
+            data,
+            block,
+            end: None,
+        }
+    }
+
+    pub fn overwrite(key: EntityKey, data: Entity, block: BlockNumber) -> Self {
+        EntityModification::Overwrite {
+            key,
+            data,
+            block,
+            end: None,
+        }
+    }
+
+    pub fn remove(key: EntityKey, block: BlockNumber) -> Self {
+        EntityModification::Remove { key, block }
+    }
+
+    pub fn key(&self) -> &EntityKey {
+        use EntityModification::*;
+        match self {
+            Insert { key, .. } | Overwrite { key, .. } | Remove { key, .. } => key,
+        }
+    }
+}
+
 /// A list of entity changes grouped by the entity type
 #[derive(Debug)]
 pub struct RowGroup {
@@ -294,14 +292,17 @@ pub struct RowGroup {
     /// All changes for this entity type, ordered by block; i.e., if `i < j`
     /// then `rows[i].block() <= rows[j].block()`. Several methods on this
     /// struct rely on the fact that this ordering is observed.
-    rows: Vec<EntityMod>,
+    rows: Vec<EntityModification>,
+
+    immutable: bool,
 }
 
 impl RowGroup {
-    pub fn new(entity_type: EntityType) -> Self {
+    pub fn new(entity_type: EntityType, immutable: bool) -> Self {
         Self {
             entity_type,
             rows: Vec::new(),
+            immutable,
         }
     }
 
@@ -321,8 +322,7 @@ impl RowGroup {
             ));
         }
 
-        let row = EntityMod::new(emod, block);
-        self.append_row(row)
+        self.append_row(emod)
     }
 
     fn row_count(&self) -> usize {
@@ -337,12 +337,12 @@ impl RowGroup {
 
     /// Iterate over all changes that need clamping of the block range of an
     /// existing entity version
-    pub fn clamps_by_block(&self) -> impl Iterator<Item = (BlockNumber, &[EntityMod])> {
+    pub fn clamps_by_block(&self) -> impl Iterator<Item = (BlockNumber, &[EntityModification])> {
         ClampsByBlockIterator::new(self)
     }
 
     /// Iterate over all changes that require writing a new entity version
-    pub fn writes(&self) -> impl Iterator<Item = &EntityMod> {
+    pub fn writes(&self) -> impl Iterator<Item = &EntityModification> {
         self.rows.iter().filter(|row| row.is_write())
     }
 
@@ -384,15 +384,31 @@ impl RowGroup {
     }
 
     /// Find the most recent entry for `id`
-    fn prev_row_mut(&mut self, id: &Word) -> Option<&mut EntityMod> {
+    fn prev_row_mut(&mut self, id: &Word) -> Option<&mut EntityModification> {
         self.rows.iter_mut().rfind(|emod| emod.id() == id)
     }
 
     /// Append `row` to `self.rows` by combining it with a previously
     /// existing row, if that is possible
-    fn append_row(&mut self, row: EntityMod) -> Result<(), StoreError> {
+    fn append_row(&mut self, row: EntityModification) -> Result<(), StoreError> {
+        if self.immutable {
+            match row {
+                EntityModification::Insert { .. } => {
+                    self.rows.push(row);
+                }
+                EntityModification::Overwrite { .. } | EntityModification::Remove { .. } => {
+                    return Err(constraint_violation!(
+                        "immutable entity type {} only allows inserts, not {:?}",
+                        self.entity_type,
+                        row
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
         if let Some(prev_row) = self.prev_row_mut(row.id()) {
-            use EntityMod::*;
+            use EntityModification::*;
 
             if row.block() <= prev_row.block() {
                 return Err(constraint_violation!(
@@ -452,6 +468,7 @@ impl RowGroup {
             ));
         }
 
+        self.rows.reserve(group.rows.len());
         for row in group.rows {
             self.append_row(row)?;
         }
@@ -466,7 +483,7 @@ impl RowGroup {
 
 struct ClampsByBlockIterator<'a> {
     position: usize,
-    rows: &'a [EntityMod],
+    rows: &'a [EntityModification],
 }
 
 impl<'a> ClampsByBlockIterator<'a> {
@@ -479,7 +496,7 @@ impl<'a> ClampsByBlockIterator<'a> {
 }
 
 impl<'a> Iterator for ClampsByBlockIterator<'a> {
-    type Item = (BlockNumber, &'a [EntityMod]);
+    type Item = (BlockNumber, &'a [EntityModification]);
 
     fn next(&mut self) -> Option<Self::Item> {
         // Make sure we start on a clamp
@@ -507,12 +524,16 @@ impl<'a> Iterator for ClampsByBlockIterator<'a> {
 /// A list of entity changes with one group per entity type
 #[derive(Debug)]
 pub struct RowGroups {
+    schema: Arc<InputSchema>,
     pub groups: Vec<RowGroup>,
 }
 
 impl RowGroups {
-    fn new() -> Self {
-        Self { groups: Vec::new() }
+    fn new(schema: Arc<InputSchema>) -> Self {
+        Self {
+            schema,
+            groups: Vec::new(),
+        }
     }
 
     fn group(&self, entity_type: &EntityType) -> Option<&RowGroup> {
@@ -531,7 +552,9 @@ impl RowGroups {
         match pos {
             Some(pos) => &mut self.groups[pos],
             None => {
-                self.groups.push(RowGroup::new(entity_type.clone()));
+                let immutable = self.schema.is_immutable(entity_type);
+                self.groups
+                    .push(RowGroup::new(entity_type.clone(), immutable));
                 // unwrap: we just pushed an entry
                 self.groups.last_mut().unwrap()
             }
@@ -605,16 +628,19 @@ pub struct Batch {
     pub deterministic_errors: Vec<SubgraphError>,
     pub offchain_to_remove: DataSources,
     pub error: Option<StoreError>,
+    pub is_non_fatal_errors_active: bool,
 }
 
 impl Batch {
     pub fn new(
+        schema: Arc<InputSchema>,
         block_ptr: BlockPtr,
         firehose_cursor: FirehoseCursor,
         mut raw_mods: Vec<EntityModification>,
         data_sources: Vec<StoredDynamicDataSource>,
         deterministic_errors: Vec<SubgraphError>,
         offchain_to_remove: Vec<StoredDynamicDataSource>,
+        is_non_fatal_errors_active: bool,
     ) -> Result<Self, StoreError> {
         let block = block_ptr.number;
 
@@ -628,11 +654,10 @@ impl Batch {
             EntityModification::Remove { .. } => 0,
         });
 
-        let mut mods = RowGroups::new();
+        let mut mods = RowGroups::new(schema);
 
         for m in raw_mods {
-            mods.group_entry(&m.entity_ref().entity_type)
-                .push(m, block)?;
+            mods.group_entry(&m.key().entity_type).push(m, block)?;
         }
 
         let data_sources = DataSources::new(block_ptr.cheap_clone(), data_sources);
@@ -647,6 +672,7 @@ impl Batch {
             deterministic_errors,
             offchain_to_remove,
             error: None,
+            is_non_fatal_errors_active,
         })
     }
 
@@ -757,13 +783,14 @@ impl CacheWeight for RowGroup {
     }
 }
 
-impl CacheWeight for EntityMod {
+impl CacheWeight for EntityModification {
     fn indirect_weight(&self) -> usize {
         match self {
-            EntityMod::Insert { key, data, .. } | EntityMod::Overwrite { key, data, .. } => {
+            EntityModification::Insert { key, data, .. }
+            | EntityModification::Overwrite { key, data, .. } => {
                 key.indirect_weight() + data.indirect_weight()
             }
-            EntityMod::Remove { key, .. } => key.indirect_weight(),
+            EntityModification::Remove { key, .. } => key.indirect_weight(),
         }
     }
 }
@@ -876,7 +903,8 @@ impl<'a> Iterator for WriteChunkIter<'a> {
 mod test {
     use crate::{
         components::store::{
-            write::EntityMod, write::EntityOp, BlockNumber, EntityKey, EntityType, StoreError,
+            write::EntityModification, write::EntityOp, BlockNumber, EntityKey, EntityType,
+            StoreError,
         },
         entity,
         prelude::DeploymentHash,
@@ -893,7 +921,7 @@ mod test {
         let rows = values
             .iter()
             .zip(blocks.iter())
-            .map(|(value, block)| EntityMod::Remove {
+            .map(|(value, block)| EntityModification::Remove {
                 key: EntityKey::data("RowGroup".to_string(), value.to_string()),
                 block: *block,
             })
@@ -901,6 +929,7 @@ mod test {
         let group = RowGroup {
             entity_type: EntityType::new("Entry".to_string()),
             rows,
+            immutable: false,
         };
         let act = group
             .clamps_by_block()
@@ -954,33 +983,33 @@ mod test {
         OvwC(BlockNumber, BlockNumber),
     }
 
-    impl From<&Mod> for EntityMod {
+    impl From<&Mod> for EntityModification {
         fn from(value: &Mod) -> Self {
             use Mod::*;
 
             let value = value.clone();
             let key = EntityKey::data("Thing", "one");
             match value {
-                Ins(block) => EntityMod::Insert {
+                Ins(block) => EntityModification::Insert {
                     key,
                     data: entity! { SCHEMA => id: "one", count: block },
                     block,
                     end: None,
                 },
-                Ovw(block) => EntityMod::Overwrite {
+                Ovw(block) => EntityModification::Overwrite {
                     key,
                     data: entity! { SCHEMA => id: "one", count: block },
                     block,
                     end: None,
                 },
-                Rem(block) => EntityMod::Remove { key, block },
-                InsC(block, end) => EntityMod::Insert {
+                Rem(block) => EntityModification::Remove { key, block },
+                InsC(block, end) => EntityModification::Insert {
                     key,
                     data: entity! { SCHEMA => id: "one", count: block },
                     block,
                     end: Some(end),
                 },
-                OvwC(block, end) => EntityMod::Overwrite {
+                OvwC(block, end) => EntityModification::Overwrite {
                     key,
                     data: entity! { SCHEMA => id: "one", count: block },
                     block,
@@ -999,13 +1028,13 @@ mod test {
     impl Group {
         fn new() -> Self {
             Self {
-                group: RowGroup::new(ENTITY_TYPE.clone()),
+                group: RowGroup::new(ENTITY_TYPE.clone(), false),
             }
         }
 
         fn append(&mut self, mods: &[Mod]) -> Result<(), StoreError> {
             for m in mods {
-                self.group.append_row(EntityMod::from(m))?
+                self.group.append_row(EntityModification::from(m))?
             }
             Ok(())
         }
@@ -1019,7 +1048,7 @@ mod test {
 
     impl PartialEq<&[Mod]> for Group {
         fn eq(&self, mods: &&[Mod]) -> bool {
-            let mods: Vec<_> = mods.iter().map(|m| EntityMod::from(m)).collect();
+            let mods: Vec<_> = mods.iter().map(|m| EntityModification::from(m)).collect();
             self.group.rows == mods
         }
     }

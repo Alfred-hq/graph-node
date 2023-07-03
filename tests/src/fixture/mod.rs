@@ -18,6 +18,7 @@ use graph::blockchain::{
 use graph::cheap_clone::CheapClone;
 use graph::components::metrics::MetricsRegistry;
 use graph::components::store::{BlockStore, DeploymentLocator};
+use graph::components::subgraph::Settings;
 use graph::data::graphql::effort::LoadManager;
 use graph::data::query::{Query, QueryTarget};
 use graph::data::subgraph::schema::{SubgraphError, SubgraphHealth};
@@ -298,11 +299,13 @@ pub async fn stores(store_config_path: &str) -> Stores {
     let chain_head_listener = store_builder.chain_head_update_listener();
     let network_identifiers = vec![(
         network_name.clone(),
-        (vec![ChainIdentifier {
+        ChainIdentifier {
             net_version: "".into(),
             genesis_block_hash: test_ptr(0).hash,
-        }]),
-    )];
+        },
+    )]
+    .into_iter()
+    .collect();
     let network_store = store_builder.network_store(network_identifiers);
     let chain_store = network_store
         .block_store()
@@ -408,6 +411,7 @@ pub async fn setup<C: Blockchain>(
         blockchain_map.clone(),
         node_id.clone(),
         SubgraphVersionSwitchingMode::Instant,
+        Arc::new(Settings::default()),
     ));
 
     SubgraphRegistrar::create_subgraph(subgraph_registrar.as_ref(), subgraph_name.clone())

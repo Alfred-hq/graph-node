@@ -17,6 +17,7 @@ use graph::blockchain::client::ChainClient;
 use graph::blockchain::{BlockchainKind, BlockchainMap};
 use graph::cheap_clone::CheapClone;
 use graph::components::store::{BlockStore as _, DeploymentLocator};
+use graph::components::subgraph::Settings;
 use graph::endpoint::EndpointMetrics;
 use graph::env::EnvVars;
 use graph::firehose::FirehoseEndpoints;
@@ -110,7 +111,7 @@ pub async fn run(
 
     let eth_adapters2 = eth_adapters.clone();
 
-    let (_, ethereum_idents) = connect_ethereum_networks(&logger, eth_networks).await;
+    let (_, ethereum_idents) = connect_ethereum_networks(&logger, eth_networks).await?;
     // let (near_networks, near_idents) = connect_firehose_networks::<NearFirehoseHeaderOnlyBlock>(
     //     &logger,
     //     firehose_networks_by_kind
@@ -198,6 +199,7 @@ pub async fn run(
         blockchain_map,
         node_id.clone(),
         SubgraphVersionSwitchingMode::Instant,
+        Arc::new(Settings::default()),
     ));
 
     let (name, hash) = if subgraph.contains(':') {

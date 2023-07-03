@@ -31,6 +31,7 @@ use graph_store_postgres::{
     SubscriptionManager, PRIMARY_SHARD,
 };
 use lazy_static::lazy_static;
+use std::collections::BTreeMap;
 use std::{collections::HashMap, env, num::ParseIntError, sync::Arc, time::Duration};
 const VERSION_LABEL_KEY: &str = "version";
 
@@ -158,6 +159,16 @@ pub enum Command {
         /// The deployment (see `help info`)
         deployment: DeploymentSearch,
     },
+    /// Pause a deployment
+    Pause {
+        /// The deployment (see `help info`)
+        deployment: DeploymentSearch,
+    },
+    /// Resume a deployment
+    Resume {
+        /// The deployment (see `help info`)
+        deployment: DeploymentSearch,
+    },
     /// Rewind a subgraph to a specific block
     Rewind {
         /// Force rewinding even if the block hash is not found in the local
@@ -171,7 +182,7 @@ pub enum Command {
         #[clap(
             long,
             short,
-            default_value = "10",
+            default_value = "20",
             parse(try_from_str = parse_duration_in_secs)
         )]
         sleep: Duration,
@@ -382,6 +393,15 @@ pub enum ConfigCommand {
         #[clap(short, long, default_value = "")]
         features: String,
         network: String,
+    },
+    /// Show subgraph-specific settings
+    ///
+    /// GRAPH_EXPERIMENTAL_SUBGRAPH_SETTINGS can add a file that contains
+    /// subgraph-specific settings. This command determines which settings
+    /// would apply when a subgraph <name> is deployed and prints the result
+    Setting {
+        /// The subgraph name for which to print settings
+        name: String,
     },
 }
 
@@ -873,7 +893,7 @@ impl Context {
             pools.clone(),
             subgraph_store,
             HashMap::default(),
-            vec![],
+            BTreeMap::new(),
             self.registry,
         );
 
@@ -1079,6 +1099,7 @@ async fn main() -> anyhow::Result<()> {
                     commands::config::provider(logger, &ctx.config, registry, features, network)
                         .await
                 }
+                Setting { name } => commands::config::setting(&name),
             }
         }
         Remove { name } => commands::remove::run(ctx.subgraph_store(), &name),
@@ -1090,6 +1111,14 @@ async fn main() -> anyhow::Result<()> {
         Reassign { deployment, node } => {
             let sender = ctx.notification_sender();
             commands::assign::reassign(ctx.primary_pool(), &sender, &deployment, node)
+        }
+        Pause { deployment } => {
+            let sender = ctx.notification_sender();
+            commands::assign::pause_or_resume(ctx.primary_pool(), &sender, &deployment, true)
+        }
+        Resume { deployment } => {
+            let sender = ctx.notification_sender();
+            commands::assign::pause_or_resume(ctx.primary_pool(), &sender, &deployment, false)
         }
         Rewind {
             force,

@@ -84,10 +84,10 @@ pub fn row_group_update(
     block: BlockNumber,
     data: impl IntoIterator<Item = (EntityKey, Entity)>,
 ) -> RowGroup {
-    let mut group = RowGroup::new(entity_type.clone());
+    let mut group = RowGroup::new(entity_type.clone(), false);
     for (key, data) in data {
         group
-            .push(EntityModification::Overwrite { key, data }, block)
+            .push(EntityModification::overwrite(key, data, block), block)
             .unwrap();
     }
     group
@@ -98,10 +98,10 @@ pub fn row_group_insert(
     block: BlockNumber,
     data: impl IntoIterator<Item = (EntityKey, Entity)>,
 ) -> RowGroup {
-    let mut group = RowGroup::new(entity_type.clone());
+    let mut group = RowGroup::new(entity_type.clone(), false);
     for (key, data) in data {
         group
-            .push(EntityModification::Insert { key, data }, block)
+            .push(EntityModification::insert(key, data, block), block)
             .unwrap();
     }
     group
@@ -112,10 +112,10 @@ pub fn row_group_delete(
     block: BlockNumber,
     data: impl IntoIterator<Item = EntityKey>,
 ) -> RowGroup {
-    let mut group = RowGroup::new(entity_type.clone());
+    let mut group = RowGroup::new(entity_type.clone(), false);
     for key in data {
         group
-            .push(EntityModification::Remove { key }, block)
+            .push(EntityModification::remove(key, block), block)
             .unwrap();
     }
     group

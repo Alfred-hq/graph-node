@@ -1,17 +1,20 @@
 use anyhow::anyhow;
+use inflector::Inflector;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use crate::cheap_clone::CheapClone;
-use crate::components::store::{self as s, Entity, EntityKey, EntityOp, EntityOperation};
+use crate::components::store::write::EntityModification;
+use crate::components::store::{self as s, Entity, EntityKey, EntityOperation};
 use crate::data::store::IntoEntityIterator;
 use crate::prelude::ENV_VARS;
 use crate::schema::InputSchema;
+use crate::util::intern::Error as InternError;
 use crate::util::lfu_cache::{EvictStats, LfuCache};
 
-use super::{DerivedEntityQuery, EntityType, LoadRelatedRequest, StoreError};
+use super::{BlockNumber, DerivedEntityQuery, EntityType, LoadRelatedRequest, StoreError};
 
 /// The scope in which the `EntityCache` should perform a `get` operation
 pub enum GetScope {
@@ -19,6 +22,45 @@ pub enum GetScope {
     Store,
     /// Get from the entities that have been stored during this block
     InBlock,
+}
+
+/// A representation of entity operations that can be accumulated.
+#[derive(Debug, Clone)]
+enum EntityOp {
+    Remove,
+    Update(Entity),
+    Overwrite(Entity),
+}
+
+impl EntityOp {
+    fn apply_to(self, entity: &mut Option<Cow<Entity>>) -> Result<(), InternError> {
+        use EntityOp::*;
+        match (self, entity) {
+            (Remove, e @ _) => *e = None,
+            (Overwrite(new), e @ _) | (Update(new), e @ None) => *e = Some(Cow::Owned(new)),
+            (Update(updates), Some(entity)) => entity.to_mut().merge_remove_null_fields(updates)?,
+        }
+        Ok(())
+    }
+
+    fn accumulate(&mut self, next: EntityOp) {
+        use EntityOp::*;
+        let update = match next {
+            // Remove and Overwrite ignore the current value.
+            Remove | Overwrite(_) => {
+                *self = next;
+                return;
+            }
+            Update(update) => update,
+        };
+
+        // We have an update, apply it.
+        match self {
+            // This is how `Overwrite` is constructed, by accumulating `Update` onto `Remove`.
+            Remove => *self = Overwrite(update),
+            Update(current) | Overwrite(current) => current.merge(update),
+        }
+    }
 }
 
 /// A cache for entities from the store that provides the basic functionality
@@ -161,7 +203,7 @@ impl EntityCache {
 
         let query = DerivedEntityQuery {
             entity_type: EntityType::new(base_type.to_string()),
-            entity_field: field.name.clone().into(),
+            entity_field: field.name.clone().to_snake_case().into(),
             value: eref.entity_id.clone(),
             causality_region: eref.causality_region,
         };
@@ -251,7 +293,10 @@ impl EntityCache {
     /// to the current state is actually needed.
     ///
     /// Also returns the updated `LfuCache`.
-    pub fn as_modifications(mut self) -> Result<ModificationsAndCache, StoreError> {
+    pub fn as_modifications(
+        mut self,
+        block: BlockNumber,
+    ) -> Result<ModificationsAndCache, StoreError> {
         assert!(!self.in_handler);
 
         // The first step is to make sure all entities being set are in `self.current`.
@@ -276,7 +321,7 @@ impl EntityCache {
 
         let mut mods = Vec::new();
         for (key, update) in self.updates {
-            use s::EntityModification::*;
+            use EntityModification::*;
 
             let current = self.current.remove(&key).and_then(|entity| entity);
             let modification = match (current, update) {
@@ -285,7 +330,12 @@ impl EntityCache {
                 | (None, EntityOp::Overwrite(mut updates)) => {
                     updates.remove_null_fields();
                     self.current.insert(key.clone(), Some(updates.clone()));
-                    Some(Insert { key, data: updates })
+                    Some(Insert {
+                        key,
+                        data: updates,
+                        block,
+                        end: None,
+                    })
                 }
                 // Entity may have been changed
                 (Some(current), EntityOp::Update(updates)) => {
@@ -294,7 +344,12 @@ impl EntityCache {
                         .map_err(|e| key.unknown_attribute(e))?;
                     self.current.insert(key.clone(), Some(data.clone()));
                     if current != data {
-                        Some(Overwrite { key, data })
+                        Some(Overwrite {
+                            key,
+                            data,
+                            block,
+                            end: None,
+                        })
                     } else {
                         None
                     }
@@ -303,7 +358,12 @@ impl EntityCache {
                 (Some(current), EntityOp::Overwrite(data)) => {
                     self.current.insert(key.clone(), Some(data.clone()));
                     if current != data {
-                        Some(Overwrite { key, data })
+                        Some(Overwrite {
+                            key,
+                            data,
+                            block,
+                            end: None,
+                        })
                     } else {
                         None
                     }
@@ -311,7 +371,7 @@ impl EntityCache {
                 // Existing entity was deleted
                 (Some(_), EntityOp::Remove) => {
                     self.current.insert(key.clone(), None);
-                    Some(Remove { key })
+                    Some(Remove { key, block })
                 }
                 // Entity was deleted, but it doesn't exist in the store
                 (None, EntityOp::Remove) => None,

@@ -97,7 +97,7 @@ impl<C: Blockchain, T: RuntimeHostBuilder<C>> IndexingContext<C, T> {
     ) -> Result<BlockState<C>, MappingError> {
         self.process_trigger_in_hosts(
             logger,
-            self.instance.hosts(),
+            self.instance.hosts_for_trigger(trigger),
             block,
             trigger,
             state,
@@ -113,7 +113,7 @@ impl<C: Blockchain, T: RuntimeHostBuilder<C>> IndexingContext<C, T> {
     pub async fn process_trigger_in_hosts(
         &self,
         logger: &Logger,
-        hosts: &[Arc<T::Host>],
+        hosts: Box<dyn Iterator<Item = &T::Host> + Send + '_>,
         block: &Arc<C::Block>,
         trigger: &TriggerData<C>,
         state: BlockState<C>,
@@ -185,7 +185,7 @@ impl<C: Blockchain, T: RuntimeHostBuilder<C>> IndexingContext<C, T> {
 
 pub struct OffchainMonitor {
     ipfs_monitor: PollingMonitor<CidFile>,
-    ipfs_monitor_rx: mpsc::Receiver<(CidFile, Bytes)>,
+    ipfs_monitor_rx: mpsc::UnboundedReceiver<(CidFile, Bytes)>,
 }
 
 impl OffchainMonitor {
@@ -195,7 +195,9 @@ impl OffchainMonitor {
         subgraph_hash: &DeploymentHash,
         ipfs_service: IpfsService,
     ) -> Self {
-        let (ipfs_monitor_tx, ipfs_monitor_rx) = mpsc::channel(10);
+        // The channel is unbounded, as it is expected that `fn ready_offchain_events` is called
+        // frequently, or at least with the same frequency that requests are sent.
+        let (ipfs_monitor_tx, ipfs_monitor_rx) = mpsc::unbounded_channel();
         let ipfs_monitor = spawn_monitor(
             ipfs_service,
             ipfs_monitor_tx,

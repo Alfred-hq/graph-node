@@ -16,7 +16,7 @@ use futures::stream::poll_fn;
 use futures::{Async, Poll, Stream};
 use graphql_parser::schema as s;
 use serde::{Deserialize, Serialize};
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Display;
@@ -26,12 +26,13 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use crate::blockchain::Block;
+use crate::components::store::write::EntityModification;
 use crate::data::store::scalar::Bytes;
 use crate::data::store::*;
 use crate::data::value::Word;
 use crate::data_source::CausalityRegion;
 use crate::schema::InputSchema;
-use crate::util::intern::{self, Error as InternError};
+use crate::util::intern;
 use crate::{constraint_violation, prelude::*};
 
 /// The type name of an entity. This is the string that is used in the
@@ -723,9 +724,9 @@ impl StoreEvent {
         let changes: Vec<_> = mods
             .into_iter()
             .map(|op| {
-                use self::EntityModification::*;
+                use EntityModification::*;
                 match op {
-                    Insert { key, .. } | Overwrite { key, .. } | Remove { key } => {
+                    Insert { key, .. } | Overwrite { key, .. } | Remove { key, .. } => {
                         EntityChange::for_data(subgraph_id.clone(), key.clone())
                     }
                 }
@@ -1001,82 +1002,6 @@ impl Display for DeploymentLocator {
 // The type that the connection pool uses to track wait times for
 // connection checkouts
 pub type PoolWaitStats = Arc<RwLock<MovingStats>>;
-
-/// An entity operation that can be transacted into the store; as opposed to
-/// `EntityOperation`, we already know whether a `Set` should be an `Insert`
-/// or `Update`
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EntityModification {
-    /// Insert the entity
-    Insert { key: EntityKey, data: Entity },
-    /// Update the entity by overwriting it
-    Overwrite { key: EntityKey, data: Entity },
-    /// Remove the entity
-    Remove { key: EntityKey },
-}
-
-impl EntityModification {
-    pub fn entity_ref(&self) -> &EntityKey {
-        use EntityModification::*;
-        match self {
-            Insert { key, .. } | Overwrite { key, .. } | Remove { key } => key,
-        }
-    }
-
-    pub fn entity(&self) -> Option<&Entity> {
-        match self {
-            EntityModification::Insert { data, .. }
-            | EntityModification::Overwrite { data, .. } => Some(data),
-            EntityModification::Remove { .. } => None,
-        }
-    }
-
-    pub fn is_remove(&self) -> bool {
-        match self {
-            EntityModification::Remove { .. } => true,
-            _ => false,
-        }
-    }
-}
-
-/// A representation of entity operations that can be accumulated.
-#[derive(Debug, Clone)]
-enum EntityOp {
-    Remove,
-    Update(Entity),
-    Overwrite(Entity),
-}
-
-impl EntityOp {
-    fn apply_to(self, entity: &mut Option<Cow<Entity>>) -> Result<(), InternError> {
-        use EntityOp::*;
-        match (self, entity) {
-            (Remove, e @ _) => *e = None,
-            (Overwrite(new), e @ _) | (Update(new), e @ None) => *e = Some(Cow::Owned(new)),
-            (Update(updates), Some(entity)) => entity.to_mut().merge_remove_null_fields(updates)?,
-        }
-        Ok(())
-    }
-
-    fn accumulate(&mut self, next: EntityOp) {
-        use EntityOp::*;
-        let update = match next {
-            // Remove and Overwrite ignore the current value.
-            Remove | Overwrite(_) => {
-                *self = next;
-                return;
-            }
-            Update(update) => update,
-        };
-
-        // We have an update, apply it.
-        match self {
-            // This is how `Overwrite` is constructed, by accumulating `Update` onto `Remove`.
-            Remove => *self = Overwrite(update),
-            Update(current) | Overwrite(current) => current.merge(update),
-        }
-    }
-}
 
 /// Determines which columns should be selected in a table.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

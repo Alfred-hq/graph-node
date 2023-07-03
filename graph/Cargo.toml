@@ -13,7 +13,7 @@ bytes = "1.0.1"
 cid = "0.10.1"
 diesel = { version = "1.4.8", features = ["postgres", "serde_json", "numeric", "r2d2", "chrono"] }
 diesel_derives = "1.4"
-chrono = "0.4.24"
+chrono = "0.4.25"
 envconfig = "0.10.0"
 Inflector = "0.11.3"
 isatty = "0.1.9"
@@ -33,6 +33,7 @@ semver = { version = "1.0.16", features = ["serde"] }
 serde = { version = "1.0.126", features = ["rc"] }
 serde_derive = "1.0.125"
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+serde_regex = "1.1.0"
 serde_yaml = "0.9.21"
 slog = { version = "2.7.0", features = ["release_max_level_trace", "max_level_trace"] }
 stable-hash_legacy = { version = "0.3.3", package = "stable-hash" }
@@ -44,10 +45,11 @@ slog-envlogger = "2.1.0"
 slog-term = "2.7.0"
 petgraph = "0.6.3"
 tiny-keccak = "1.5.0"
-tokio = { version = "1.28.1", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
+tokio = { version = "1.28.2", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tokio-retry = "0.3.0"
-url = "2.3.1"
+toml = "0.7.5"
+url = "2.4.0"
 prometheus = "0.13.3"
 priority-queue = "0.7.0"
 tonic = { workspace = true }
@@ -58,7 +60,7 @@ futures03 = { version = "0.3.1", package = "futures", features = ["compat"] }
 wasmparser = "0.78.2"
 thiserror = "1.0.25"
 parking_lot = "0.12.1"
-itertools = "0.10.5"
+itertools = "0.11.0"
 
 # Our fork contains patches to make some fields optional for Celo and Fantom compatibility.
 # Without the "arbitrary_precision" feature, we get the error `data did not match any variant of untagged enum Response`.

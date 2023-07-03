@@ -25,7 +25,7 @@ use diesel::{
 use graph::{
     components::store::DeploymentLocator,
     constraint_violation,
-    data::subgraph::status,
+    data::subgraph::{status, DeploymentFeatures},
     prelude::{
         anyhow, bigdecimal::ToPrimitive, serde_json, DeploymentHash, EntityChange,
         EntityChangeOperation, NodeId, StoreError, SubgraphName, SubgraphVersionSwitchingMode,
@@ -79,6 +79,17 @@ table! {
 }
 
 table! {
+    subgraphs.subgraph_features (id) {
+        id -> Text,
+        spec_version -> Text,
+        api_version -> Nullable<Text>,
+        features -> Array<Text>,
+        data_sources -> Array<Text>,
+        network -> Text,
+    }
+}
+
+table! {
     subgraphs.subgraph_version (vid) {
         vid -> BigInt,
         id -> Text,
@@ -93,6 +104,8 @@ table! {
     subgraphs.subgraph_deployment_assignment {
         id -> Integer,
         node_id -> Text,
+        paused_at -> Nullable<Timestamptz>,
+        assigned_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -403,6 +416,7 @@ pub fn make_dummy_site(deployment: DeploymentHash, namespace: Namespace, network
 /// mirrored through `Mirror::refresh_tables` and must be queries, i.e.,
 /// read-only
 mod queries {
+    use diesel::data_types::PgTimestamp;
     use diesel::dsl::{any, exists, sql};
     use diesel::pg::PgConnection;
     use diesel::prelude::{
@@ -585,6 +599,22 @@ mod queries {
             .collect::<Result<Vec<Site>, _>>()
     }
 
+    // All assignments for a node that are currently not paused
+    pub(super) fn active_assignments(
+        conn: &PgConnection,
+        node: &NodeId,
+    ) -> Result<Vec<Site>, StoreError> {
+        ds::table
+            .inner_join(a::table.on(a::id.eq(ds::id)))
+            .filter(a::node_id.eq(node.as_str()))
+            .filter(a::paused_at.is_null())
+            .select(ds::all_columns)
+            .load::<Schema>(conn)?
+            .into_iter()
+            .map(Site::try_from)
+            .collect::<Result<Vec<Site>, _>>()
+    }
+
     pub(super) fn fill_assignments(
         conn: &PgConnection,
         infos: &mut [status::Info],
@@ -620,6 +650,36 @@ mod queries {
                         site.deployment
                     )
                 })
+            })
+            .transpose()
+    }
+
+    /// Returns Option<(node_id,is_paused)> where `node_id` is the node that
+    /// the subgraph is assigned to, and `is_paused` is true if the
+    /// subgraph is paused.
+    /// Returns None if the deployment does not exist.
+    pub(super) fn assignment_status(
+        conn: &PgConnection,
+        site: &Site,
+    ) -> Result<Option<(NodeId, bool)>, StoreError> {
+        a::table
+            .filter(a::id.eq(site.id))
+            .select((a::node_id, a::paused_at))
+            .first::<(String, Option<PgTimestamp>)>(conn)
+            .optional()?
+            .map(|(node, ts)| {
+                let node_id = NodeId::new(&node).map_err(|()| {
+                    constraint_violation!(
+                        "invalid node id `{}` in assignment for `{}`",
+                        node,
+                        site.deployment
+                    )
+                })?;
+
+                match ts {
+                    Some(_) => Ok((node_id, true)),
+                    None => Ok((node_id, false)),
+                }
             })
             .transpose()
     }
@@ -979,6 +1039,51 @@ impl<'a> Connection<'a> {
         }
     }
 
+    pub fn pause_subgraph(&self, site: &Site) -> Result<Vec<EntityChange>, StoreError> {
+        use subgraph_deployment_assignment as a;
+
+        let conn = self.conn.as_ref();
+
+        let updates = update(a::table.filter(a::id.eq(site.id)))
+            .set(a::paused_at.eq(sql("now()")))
+            .execute(conn)?;
+        match updates {
+            0 => Err(StoreError::DeploymentNotFound(site.deployment.to_string())),
+            1 => {
+                let change =
+                    EntityChange::for_assignment(site.into(), EntityChangeOperation::Removed);
+                Ok(vec![change])
+            }
+            _ => {
+                // `id` is the primary key of the subgraph_deployment_assignment table,
+                // and we can therefore only update no or one entry
+                unreachable!()
+            }
+        }
+    }
+
+    pub fn resume_subgraph(&self, site: &Site) -> Result<Vec<EntityChange>, StoreError> {
+        use subgraph_deployment_assignment as a;
+
+        let conn = self.conn.as_ref();
+
+        let updates = update(a::table.filter(a::id.eq(site.id)))
+            .set(a::paused_at.eq(sql("null")))
+            .execute(conn)?;
+        match updates {
+            0 => Err(StoreError::DeploymentNotFound(site.deployment.to_string())),
+            1 => {
+                let change = EntityChange::for_assignment(site.into(), EntityChangeOperation::Set);
+                Ok(vec![change])
+            }
+            _ => {
+                // `id` is the primary key of the subgraph_deployment_assignment table,
+                // and we can therefore only update no or one entry
+                unreachable!()
+            }
+        }
+    }
+
     pub fn reassign_subgraph(
         &self,
         site: &Site,
@@ -1002,6 +1107,67 @@ impl<'a> Connection<'a> {
                 unreachable!()
             }
         }
+    }
+
+    pub fn get_subgraph_features(
+        &self,
+        id: String,
+    ) -> Result<Option<DeploymentFeatures>, StoreError> {
+        use subgraph_features as f;
+
+        let conn = self.conn.as_ref();
+        let features = f::table
+            .filter(f::id.eq(id))
+            .select((
+                f::id,
+                f::spec_version,
+                f::api_version,
+                f::features,
+                f::data_sources,
+                f::network,
+            ))
+            .first::<(
+                String,
+                String,
+                Option<String>,
+                Vec<String>,
+                Vec<String>,
+                String,
+            )>(conn)
+            .optional()?;
+
+        let features = features.map(
+            |(id, spec_version, api_version, features, data_sources, network)| DeploymentFeatures {
+                id,
+                spec_version,
+                api_version,
+                features,
+                data_source_kinds: data_sources,
+                network: network,
+            },
+        );
+
+        Ok(features)
+    }
+
+    pub fn create_subgraph_features(&self, features: DeploymentFeatures) -> Result<(), StoreError> {
+        use subgraph_features as f;
+
+        let conn = self.conn.as_ref();
+        let changes = (
+            f::id.eq(features.id),
+            f::spec_version.eq(features.spec_version),
+            f::api_version.eq(features.api_version),
+            f::features.eq(features.features),
+            f::data_sources.eq(features.data_source_kinds),
+            f::network.eq(features.network),
+        );
+
+        insert_into(f::table)
+            .values(changes.clone())
+            .on_conflict_do_nothing()
+            .execute(conn)?;
+        Ok(())
     }
 
     pub fn assign_subgraph(
@@ -1090,22 +1256,45 @@ impl<'a> Connection<'a> {
     }
 
     /// Create a site for a brand new deployment.
+    /// If it already exists, return the existing site
+    /// and a boolean indicating whether a new site was created.
+    /// `false` means the site already existed.
     pub fn allocate_site(
         &self,
         shard: Shard,
         subgraph: &DeploymentHash,
         network: String,
-        schema_version: DeploymentSchemaVersion,
-    ) -> Result<Site, StoreError> {
+        graft_base: Option<&DeploymentHash>,
+    ) -> Result<(Site, bool), StoreError> {
         if let Some(site) = queries::find_active_site(self.conn.as_ref(), subgraph)? {
-            return Ok(site);
+            return Ok((site, false));
         }
 
+        let site_was_created = true;
+        let schema_version = match graft_base {
+            Some(graft_base) => {
+                let site = queries::find_active_site(self.conn.as_ref(), graft_base)?;
+                site.map(|site| site.schema_version).ok_or_else(|| {
+                    StoreError::DeploymentNotFound("graft_base not found".to_string())
+                })
+            }
+            None => Ok(DeploymentSchemaVersion::LATEST),
+        }?;
+
         self.create_site(shard, subgraph.clone(), network, schema_version, true)
+            .map(|site| (site, site_was_created))
     }
 
     pub fn assigned_node(&self, site: &Site) -> Result<Option<NodeId>, StoreError> {
         queries::assigned_node(self.conn.as_ref(), site)
+    }
+
+    /// Returns Option<(node_id,is_paused)> where `node_id` is the node that
+    /// the subgraph is assigned to, and `is_paused` is true if the
+    /// subgraph is paused.
+    /// Returns None if the deployment does not exist.
+    pub fn assignment_status(&self, site: &Site) -> Result<Option<(NodeId, bool)>, StoreError> {
+        queries::assignment_status(self.conn.as_ref(), site)
     }
 
     /// Create a copy of the site `src` in the shard `shard`, but mark it as
@@ -1717,8 +1906,20 @@ impl Mirror {
         self.read(|conn| queries::assignments(conn, node))
     }
 
+    pub fn active_assignments(&self, node: &NodeId) -> Result<Vec<Site>, StoreError> {
+        self.read(|conn| queries::active_assignments(conn, node))
+    }
+
     pub fn assigned_node(&self, site: &Site) -> Result<Option<NodeId>, StoreError> {
         self.read(|conn| queries::assigned_node(conn, site))
+    }
+
+    /// Returns Option<(node_id,is_paused)> where `node_id` is the node that
+    /// the subgraph is assigned to, and `is_paused` is true if the
+    /// subgraph is paused.
+    /// Returns None if the deployment does not exist.
+    pub fn assignment_status(&self, site: &Site) -> Result<Option<(NodeId, bool)>, StoreError> {
+        self.read(|conn| queries::assignment_status(conn, site))
     }
 
     pub fn find_active_site(&self, subgraph: &DeploymentHash) -> Result<Option<Site>, StoreError> {

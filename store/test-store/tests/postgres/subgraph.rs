@@ -4,8 +4,11 @@ use graph::{
         store::{DeploymentId, DeploymentLocator, StatusStore},
     },
     data::query::QueryTarget,
-    data::subgraph::schema::SubgraphHealth,
-    data::subgraph::schema::{DeploymentCreate, SubgraphError},
+    data::subgraph::{schema::SubgraphHealth, SubgraphFeature},
+    data::subgraph::{
+        schema::{DeploymentCreate, SubgraphError},
+        DeploymentFeatures,
+    },
     prelude::BlockPtr,
     prelude::EntityChange,
     prelude::EntityChangeOperation,
@@ -50,6 +53,11 @@ fn get_version_info(store: &Store, subgraph_name: &str) -> VersionInfo {
     let (current, _) = primary.versions_for_subgraph(subgraph_name).unwrap();
     let current = current.unwrap();
     store.version_info(&current).unwrap()
+}
+
+fn get_subgraph_features(id: String) -> Option<DeploymentFeatures> {
+    let primary = primary_connection();
+    primary.get_subgraph_features(id).unwrap()
 }
 
 async fn latest_block(store: &Store, deployment_id: DeploymentId) -> BlockPtr {
@@ -485,6 +493,42 @@ fn version_info() {
 }
 
 #[test]
+fn subgraph_features() {
+    run_test_sequentially(|_store| async move {
+        const NAME: &str = "subgraph_features";
+        let id = DeploymentHash::new(NAME).unwrap();
+
+        remove_subgraphs();
+        block_store::set_chain(vec![], NETWORK_NAME);
+        create_test_subgraph_with_features(&id, SUBGRAPH_GQL).await;
+
+        let DeploymentFeatures {
+            id: subgraph_id,
+            spec_version,
+            api_version,
+            features,
+            data_source_kinds,
+            network,
+        } = get_subgraph_features(id.to_string()).unwrap();
+
+        assert_eq!(NAME, subgraph_id.as_str());
+        assert_eq!("1.0.0", spec_version);
+        assert_eq!("1.0.0", api_version.unwrap());
+        assert_eq!(NETWORK_NAME, network);
+        assert_eq!(
+            vec![
+                SubgraphFeature::NonFatalErrors.to_string(),
+                SubgraphFeature::FullTextSearch.to_string()
+            ],
+            features
+        );
+        assert_eq!(1, data_source_kinds.len());
+
+        test_store::remove_subgraph(&id)
+    })
+}
+
+#[test]
 fn subgraph_error() {
     test_store::run_test_sequentially(|store| async move {
         let subgraph_id = DeploymentHash::new("testSubgraph").unwrap();
@@ -506,7 +550,7 @@ fn subgraph_error() {
 
         assert!(count() == 0);
 
-        transact_errors(&store, &deployment, BLOCKS[1].clone(), vec![error])
+        transact_errors(&store, &deployment, BLOCKS[1].clone(), vec![error], false)
             .await
             .unwrap();
         assert!(count() == 1);
@@ -520,7 +564,7 @@ fn subgraph_error() {
         };
 
         // Inserting the same error is allowed but ignored.
-        transact_errors(&store, &deployment, BLOCKS[2].clone(), vec![error])
+        transact_errors(&store, &deployment, BLOCKS[2].clone(), vec![error], false)
             .await
             .unwrap();
         assert!(count() == 1);
@@ -533,10 +577,68 @@ fn subgraph_error() {
             deterministic: false,
         };
 
-        transact_errors(&store, &deployment, BLOCKS[3].clone(), vec![error2])
+        transact_errors(&store, &deployment, BLOCKS[3].clone(), vec![error2], false)
             .await
             .unwrap();
         assert!(count() == 2);
+
+        test_store::remove_subgraph(&subgraph_id);
+    })
+}
+
+#[test]
+fn subgraph_non_fatal_error() {
+    test_store::run_test_sequentially(|store| async move {
+        let subgraph_store = store.subgraph_store();
+        let subgraph_id = DeploymentHash::new("subgraph_non_fatal_error").unwrap();
+        let deployment =
+            test_store::create_test_subgraph(&subgraph_id, "type Foo { id: ID! }").await;
+
+        let count = || -> usize {
+            let store = store.subgraph_store();
+            let count = store.error_count(&subgraph_id).unwrap();
+            println!("count: {}", count);
+            count
+        };
+
+        let error = SubgraphError {
+            subgraph_id: subgraph_id.clone(),
+            message: "test".to_string(),
+            block_ptr: Some(BLOCKS[1].clone()),
+            handler: None,
+            deterministic: true,
+        };
+
+        assert!(count() == 0);
+
+        transact_errors(&store, &deployment, BLOCKS[1].clone(), vec![error], true)
+            .await
+            .unwrap();
+        assert!(count() == 1);
+
+        let info = subgraph_store.status_for_id(deployment.id);
+
+        assert!(info.non_fatal_errors.len() == 1);
+        assert!(info.health == SubgraphHealth::Unhealthy);
+
+        let error2 = SubgraphError {
+            subgraph_id: subgraph_id.clone(),
+            message: "test2".to_string(),
+            block_ptr: None,
+            handler: None,
+            deterministic: false,
+        };
+
+        // Inserting non deterministic errors will increase error count but not count of non fatal errors
+        transact_errors(&store, &deployment, BLOCKS[2].clone(), vec![error2], false)
+            .await
+            .unwrap();
+        assert!(count() == 2);
+
+        let info = subgraph_store.status_for_id(deployment.id);
+
+        assert!(info.non_fatal_errors.len() == 1);
+        assert!(info.health == SubgraphHealth::Unhealthy);
 
         test_store::remove_subgraph(&subgraph_id);
     })
@@ -592,7 +694,7 @@ fn fatal_vs_non_fatal() {
             .await
             .unwrap());
 
-        transact_errors(&store, &deployment, BLOCKS[1].clone(), vec![error()])
+        transact_errors(&store, &deployment, BLOCKS[1].clone(), vec![error()], false)
             .await
             .unwrap();
 

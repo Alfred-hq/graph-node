@@ -8,8 +8,8 @@ mod tests;
 
 use crate::{
     blockchain::{
-        BlockPtr, Blockchain, DataSource as _, DataSourceTemplate as _, TriggerData as _,
-        UnresolvedDataSource as _, UnresolvedDataSourceTemplate as _,
+        BlockPtr, Blockchain, DataSource as _, DataSourceTemplate as _, MappingTriggerTrait,
+        TriggerData as _, UnresolvedDataSource as _, UnresolvedDataSourceTemplate as _,
     },
     components::{
         link_resolver::LinkResolver,
@@ -298,6 +298,13 @@ impl<C: Blockchain> DataSourceTemplate<C> {
             Self::Offchain(ds) => ds.manifest_idx,
         }
     }
+
+    pub fn kind(&self) -> String {
+        match self {
+            Self::Onchain(ds) => ds.kind().to_string(),
+            Self::Offchain(ds) => ds.kind.to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -407,12 +414,28 @@ impl<C: Blockchain> TriggerData<C> {
             Self::Offchain(trigger) => format!("{:?}", trigger.source),
         }
     }
+
+    pub fn address_match(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Onchain(trigger) => trigger.address_match().map(|address| address.to_owned()),
+            Self::Offchain(trigger) => trigger.source.address(),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum MappingTrigger<C: Blockchain> {
     Onchain(C::MappingTrigger),
     Offchain(offchain::TriggerData),
+}
+
+impl<C: Blockchain> MappingTrigger<C> {
+    pub fn error_context(&self) -> Option<String> {
+        match self {
+            Self::Onchain(trigger) => Some(trigger.error_context()),
+            Self::Offchain(_) => None, // TODO: Add error context for offchain triggers
+        }
+    }
 }
 
 macro_rules! clone_data_source {

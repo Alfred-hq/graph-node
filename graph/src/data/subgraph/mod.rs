@@ -10,8 +10,10 @@ pub mod status;
 
 pub use features::{SubgraphFeature, SubgraphFeatureValidationError};
 
+use crate::object;
 use anyhow::{anyhow, Context, Error};
 use futures03::{future::try_join3, stream::FuturesOrdered, TryStreamExt as _};
+use itertools::Itertools;
 use semver::Version;
 use serde::{de, ser};
 use serde_yaml;
@@ -19,7 +21,7 @@ use slog::Logger;
 use stable_hash::{FieldAddress, StableHash};
 use stable_hash_legacy::SequenceNumber;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     marker::PhantomData,
 };
 use thiserror::Error;
@@ -53,7 +55,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use super::value::Word;
+use super::{graphql::IntoValue, value::Word};
 
 /// Deserialize an Address (with or without '0x' prefix).
 fn deserialize_address<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
@@ -497,6 +499,29 @@ impl Graft {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct DeploymentFeatures {
+    pub id: String,
+    pub spec_version: String,
+    pub api_version: Option<String>,
+    pub features: Vec<String>,
+    pub data_source_kinds: Vec<String>,
+    pub network: String,
+}
+
+impl IntoValue for DeploymentFeatures {
+    fn into_value(self) -> r::Value {
+        object! {
+            __typename: "SubgraphFeatures",
+            specVersion: self.spec_version,
+            apiVersion: self.api_version,
+            features: self.features,
+            dataSources: self.data_source_kinds,
+            network: self.network,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BaseSubgraphManifest<C, S, D, T> {
@@ -661,6 +686,44 @@ impl<C: Blockchain> SubgraphManifest<C> {
             .iter()
             .map(|template| template.api_version())
             .chain(self.data_sources.iter().map(|source| source.api_version()))
+    }
+
+    pub fn deployment_features(&self) -> DeploymentFeatures {
+        let unified_api_version = self.unified_mapping_api_version().ok();
+        let network = self.network_name();
+        let api_version = unified_api_version
+            .map(|v| v.version().map(|v| v.to_string()))
+            .flatten();
+
+        let features: Vec<String> = self
+            .features
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>();
+
+        let spec_version = self.spec_version.to_string();
+
+        let mut data_source_kinds = self
+            .data_sources
+            .iter()
+            .map(|ds| ds.kind().to_string())
+            .collect::<HashSet<_>>();
+
+        let data_source_template_kinds = self
+            .templates
+            .iter()
+            .map(|t| t.kind().to_string())
+            .collect::<Vec<_>>();
+
+        data_source_kinds.extend(data_source_template_kinds);
+        DeploymentFeatures {
+            id: self.id.to_string(),
+            api_version,
+            features,
+            spec_version,
+            data_source_kinds: data_source_kinds.into_iter().collect_vec(),
+            network: network,
+        }
     }
 
     pub fn runtimes(&self) -> impl Iterator<Item = Arc<Vec<u8>>> + '_ {

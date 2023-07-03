@@ -207,8 +207,10 @@ impl<C: Blockchain> WasmInstance<C> {
         let handler_name = trigger.handler_name().to_owned();
         let gas = self.gas.clone();
         let logging_extras = trigger.logging_extras().cheap_clone();
+        let error_context = trigger.trigger.error_context();
         let asc_trigger = trigger.to_asc_ptr(self.instance_ctx_mut().deref_mut(), &gas)?;
-        self.invoke_handler(&handler_name, asc_trigger, logging_extras)
+
+        self.invoke_handler(&handler_name, asc_trigger, logging_extras, error_context)
     }
 
     pub fn take_ctx(&mut self) -> WasmInstanceContext<C> {
@@ -238,6 +240,7 @@ impl<C: Blockchain> WasmInstance<C> {
         handler: &str,
         arg: AscPtr<T>,
         logging_extras: Arc<dyn SendSyncRefUnwindSafeKV>,
+        error_context: Option<String>,
     ) -> Result<(BlockState<C>, Gas), MappingError> {
         let func = self
             .instance
@@ -287,6 +290,10 @@ impl<C: Blockchain> WasmInstance<C> {
         };
 
         if let Some(deterministic_error) = deterministic_error {
+            let deterministic_error = match error_context {
+                Some(error_context) => deterministic_error.context(error_context),
+                None => deterministic_error,
+            };
             let message = format!("{:#}", deterministic_error).replace('\n', "\t");
 
             // Log the error and restore the updates snapshot, effectively reverting the handler.

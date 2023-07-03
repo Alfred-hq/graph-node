@@ -1,12 +1,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use graph::{
-    anyhow::bail,
+    anyhow::{bail, Context},
+    components::subgraph::{Setting, Settings},
     endpoint::EndpointMetrics,
+    env::EnvVars,
     itertools::Itertools,
     prelude::{
         anyhow::{anyhow, Error},
-        MetricsRegistry, NodeId,
+        MetricsRegistry, NodeId, SubgraphName,
     },
     slog::Logger,
 };
@@ -39,13 +41,27 @@ pub fn check(config: &Config, print: bool) -> Result<(), Error> {
         Ok(txt) => {
             if print {
                 println!("{}", txt);
-            } else {
-                println!("Successfully validated configuration");
+                return Ok(());
             }
-            Ok(())
         }
-        Err(e) => Err(anyhow!("error serializing config: {}", e)),
+        Err(e) => bail!("error serializing config: {}", e),
     }
+
+    let env_vars = EnvVars::from_env().unwrap();
+    if let Some(path) = &env_vars.subgraph_settings {
+        match Settings::from_file(path) {
+            Ok(_) => {
+                println!("Successfully validated subgraph settings from {path}");
+            }
+            Err(e) => {
+                eprintln!("configuration error in subgraph settings {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    };
+
+    println!("Successfully validated configuration");
+    Ok(())
 }
 
 pub fn pools(config: &Config, nodes: Vec<String>, shard: bool) -> Result<(), Error> {
@@ -140,5 +156,27 @@ pub async fn provider(
             .map(|adapter| adapter.provider().to_string())
             .join(", ")
     );
+    Ok(())
+}
+
+pub fn setting(name: &str) -> Result<(), Error> {
+    let name = SubgraphName::new(name).map_err(|()| anyhow!("illegal subgraph name `{}`", name))?;
+    let env_vars = EnvVars::from_env().unwrap();
+    if let Some(path) = &env_vars.subgraph_settings {
+        let settings = Settings::from_file(path)
+            .with_context(|| format!("syntax error in subgraph settings `{}`", path))?;
+        match settings.for_name(&name) {
+            Some(Setting { history_blocks, .. }) => {
+                println!("setting for `{name}` will use history_blocks = {history_blocks}");
+            }
+            None => {
+                println!("no specific setting for `{name}`, defaults will be used");
+            }
+        }
+    } else {
+        println!("No subgraph-specific settings will be applied because");
+        println!("GRAPH_EXPERIMENTAL_SUBGRAPH_SETTINGS is not set");
+    };
+
     Ok(())
 }

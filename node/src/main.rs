@@ -9,6 +9,7 @@ use graph::blockchain::{
     BasicBlockchainBuilder, Blockchain, BlockchainBuilder, BlockchainKind, BlockchainMap,
 };
 use graph::components::store::BlockStore;
+use graph::components::subgraph::Settings;
 use graph::data::graphql::effort::LoadManager;
 use graph::endpoint::EndpointMetrics;
 use graph::env::EnvVars;
@@ -137,6 +138,21 @@ async fn main() {
         }
         Ok(config) => config,
     };
+
+    let subgraph_settings = match env_vars.subgraph_settings {
+        Some(ref path) => {
+            info!(logger, "Reading subgraph configuration file `{}`", path);
+            match Settings::from_file(path) {
+                Ok(rules) => rules,
+                Err(e) => {
+                    eprintln!("configuration error in subgraph settings {}: {}", path, e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => Settings::default(),
+    };
+
     if opt.check_config {
         match config.to_json() {
             Ok(txt) => println!("{}", txt),
@@ -289,17 +305,22 @@ async fn main() {
         // `blockchain_map`.
         let mut blockchain_map = BlockchainMap::new();
 
+        // Unwraps: `connect_ethereum_networks` and `connect_firehose_networks` only fail if
+        // mismatching chain identifiers are returned for a same network, which indicates a serious
+        // inconsistency between providers.
         let (arweave_networks, arweave_idents) = connect_firehose_networks::<ArweaveBlock>(
             &logger,
             firehose_networks_by_kind
                 .remove(&BlockchainKind::Arweave)
                 .unwrap_or_else(FirehoseNetworks::new),
         )
-        .await;
+        .await
+        .unwrap();
 
         // This only has idents for chains with rpc adapters.
-        let (eth_networks, ethereum_idents) =
-            connect_ethereum_networks(&logger, eth_networks).await;
+        let (eth_networks, ethereum_idents) = connect_ethereum_networks(&logger, eth_networks)
+            .await
+            .unwrap();
 
         let (eth_firehose_only_networks, eth_firehose_only_idents) =
             connect_firehose_networks::<HeaderOnlyBlock>(
@@ -308,7 +329,8 @@ async fn main() {
                     .remove(&BlockchainKind::Ethereum)
                     .unwrap_or_else(FirehoseNetworks::new),
             )
-            .await;
+            .await
+            .unwrap();
 
         let (near_networks, near_idents) =
             connect_firehose_networks::<NearFirehoseHeaderOnlyBlock>(
@@ -317,7 +339,8 @@ async fn main() {
                     .remove(&BlockchainKind::Near)
                     .unwrap_or_else(FirehoseNetworks::new),
             )
-            .await;
+            .await
+            .unwrap();
 
         let (cosmos_networks, cosmos_idents) = connect_firehose_networks::<CosmosFirehoseBlock>(
             &logger,
@@ -325,15 +348,18 @@ async fn main() {
                 .remove(&BlockchainKind::Cosmos)
                 .unwrap_or_else(FirehoseNetworks::new),
         )
-        .await;
+        .await
+        .unwrap();
 
-        let network_identifiers = ethereum_idents
-            .into_iter()
-            .chain(eth_firehose_only_idents)
-            .chain(arweave_idents)
-            .chain(near_idents)
-            .chain(cosmos_idents)
-            .collect();
+        // Note that both `eth_firehose_only_idents` and `ethereum_idents` contain Ethereum
+        // networks. If the same network is configured in both RPC and Firehose, the RPC ident takes
+        // precedence. This is necessary because Firehose endpoints currently have no `net_version`.
+        // See also: firehose-no-net-version.
+        let mut network_identifiers = eth_firehose_only_idents;
+        network_identifiers.extend(ethereum_idents);
+        network_identifiers.extend(arweave_idents);
+        network_identifiers.extend(near_idents);
+        network_identifiers.extend(cosmos_idents);
 
         let network_store = store_builder.network_store(network_identifiers);
 
@@ -481,6 +507,7 @@ async fn main() {
             blockchain_map,
             node_id.clone(),
             version_switching_mode,
+            Arc::new(subgraph_settings),
         ));
         graph::spawn(
             subgraph_registrar
