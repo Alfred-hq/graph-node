@@ -14,6 +14,7 @@ jobs:
     strategy:
       matrix:
         runs-on: [ ubuntu-latest, buildjet-4vcpu-ubuntu-2204-arm ]
+    runs-on: ubuntu-latest
     name: Build and push graph-node multiarch images
     permissions:
       contents: 'read'
@@ -30,7 +31,7 @@ jobs:
       run: |
         IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
         echo "NAME=$IMAGE" >> $GITHUB_OUTPUT
-        
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
 
