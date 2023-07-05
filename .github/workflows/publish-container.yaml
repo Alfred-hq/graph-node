@@ -14,7 +14,7 @@ jobs:
     strategy:
       matrix:
         runs-on: [ ubuntu-latest, buildjet-4vcpu-ubuntu-2204-arm ]
-    runs-on: ubuntu-latest
+    runs-on: ${{matrix.runs-on}}
     name: Build and push graph-node multiarch images
     permissions:
       contents: 'read'
