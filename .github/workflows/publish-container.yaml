@@ -1,8 +1,9 @@
 name: Publish multiarch images on ghcr.io
 on:
   push:
-    tags:
-      - '*'
+    branches:    
+      - master
+      - development
 
 env:
   REGISTRY: alfredcapital
@@ -10,8 +11,10 @@ env:
 
 jobs:
   publish:
+    strategy:
+      matrix:
+        runs-on: [ ubuntu-latest, buildjet-4vcpu-ubuntu-2204-arm ]
     name: Build and push graph-node multiarch images
-    runs-on: ubuntu-latest
     permissions:
       contents: 'read'
       packages: 'write'
@@ -22,23 +25,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.7
-
-    - name: Install flake8 and docker-compose
-      run: python -m pip install flake8 docker-compose==1.17.1
-
     - name: Derive image name
       id: image
       run: |
-        IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${GITHUB_REF/refs\/tags\//}"
+        IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
         echo "NAME=$IMAGE" >> $GITHUB_OUTPUT
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v2
-
+        
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
 
@@ -48,17 +40,7 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USERNAME }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-    - name: Build and export to local docker for testing
-      uses: docker/build-push-action@v4
-      with:
-        push: true
-        context: .
-        file: ./docker/Dockerfile
-        tags: ${{ steps.image.outputs.NAME }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build arm64 additionaly and push multiarch image
+    - name: Build and push multiarch image
       uses: docker/build-push-action@v4
       with:
         push: true
@@ -67,5 +49,5 @@ jobs:
         tags: "${{ steps.image.outputs.NAME }}"
         cache-from: type=gha
         cache-to: type=gha,mode=max
-        platforms: linux/amd64,linux/arm64
+        # platforms: linux/amd64,linux/arm64
         # platforms: linux/amd64
